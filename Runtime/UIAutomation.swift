@@ -1390,7 +1390,12 @@ enum Screenshots {
         format.scale = 2
         let full = UIGraphicsImageRenderer(bounds: w.bounds, format: format).image { ctx in
             for window in UIAutomation.appWindows {
-                window.drawHierarchy(in: window.frame, afterScreenUpdates: true)
+                // A window that is never ordered on screen (the render host's) draws nothing as a whole, so each of
+                // its views is drawn in turn: the app's root, then a presented sheet's or alert's container above it.
+                for view in window.subviews where !view.isHidden && view.alpha > 0 {
+                    view.drawHierarchy(in: view.convert(view.bounds, to: window).offsetBy(dx: window.frame.minX, dy: window.frame.minY),
+                                       afterScreenUpdates: true)
+                }
             }
             if Keyboard.visible {
                 UIColor(white: 0.82, alpha: 1).setFill()
