@@ -147,11 +147,12 @@ enum UIAutomation {
                 if i + 1 < count { Input.spin(0.05) }
             }
             // A text view takes focus once its tap recognizer has waited out a
-            // double tap; the next action (typing) needs it focused.
+            // double tap; the next action (typing) needs it focused, so it is
+            // focused now instead of after that wait (0.6 s on every field: in a
+            // window with no scene the recognizer often never fires at all).
             if count == 1, let field, !field.isFirstResponder {
-                let end = Date().addingTimeInterval(0.6)
-                while !field.isFirstResponder && Date() < end { Input.spin(0.02) }
-                if !field.isFirstResponder { _ = field.becomeFirstResponder() }
+                _ = field.becomeFirstResponder()
+                Input.spin(0.03)
             }
             return ["ok": true, "how": "touch"]
         case "ui.drag":
