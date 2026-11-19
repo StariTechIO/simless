@@ -12,6 +12,8 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
   simless up [--no-tests]          build for iOS, install this worktree's slot (unsigned), start its host;
         also prepares local packages' tests and the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
+  simless start                    start this worktree's installed host if it is stopped (no build, about a second)
+        and print {"slot", "port", "dir"} as JSON; `simless up` installs it first
   simless act <fixture> <step>...  render, then tap/type/swipe/longpress/wait, then print the tree + issues
         steps: tap "<label|#id>"  type "<#id|label>" "<text>"  swipe up|down|left|right [on "<label|#id>"]
                longpress "<label|#id>"  wait <ms>   (and --device, --dark, --png, --json like render)
@@ -382,6 +384,15 @@ func runningSlot(_ ws: Workspace) throws -> SlotRecord {
     let slot = try currentSlot(ws)
     if slot.stats() == nil { try Slots.launch(slot, idleMinutes: ws.idleMinutes) }
     return slot
+}
+
+/// Starts the installed host without building: what `render` and `act` do on first use, on its own, so a caller that
+/// stops the host between runs (to wipe its data) gets it back in about a second instead of a `simless up`.
+func cmdStart(_ args: Args) throws {
+    let slot = try runningSlot(try Workspace.load())
+    let out: [String: Any] = ["slot": slot.slotID, "port": slot.port, "dir": slot.dir]
+    let data = try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
 }
 
 func cmdUp(_ args: Args) throws {
@@ -880,6 +891,7 @@ do {
     case "init": try cmdInit(args)
     case "up": if args.flags.contains("--json") { JSONReport.up(args) } else { try cmdUp(args) }
     case "render": try cmdRender(args)
+    case "start": try cmdStart(args)
     case "reload": if args.flags.contains("--json") { JSONReport.reload(args) } else { try cmdReload(args) }
     case "act": try Act.run(args)
     case "test": try cmdTest(args)
