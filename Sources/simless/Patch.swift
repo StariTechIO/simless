@@ -260,7 +260,38 @@ enum Patch {
         for dir in (try? FileManager.default.contentsOfDirectory(atPath: include)) ?? [] where exists("\(include)/\(dir)/module.modulemap") {
             maps.append("\(include)/\(dir)/module.modulemap")
         }
-        return maps
+        return firstDefinitions(maps)
+    }
+
+    /// The maps that define a module no earlier map defined. A package can ship a
+    /// module map for a C target that SwiftPM also generates one for (posthog-ios
+    /// keeps `PostHog/PrivateModules/*/module.modulemap` for CocoaPods and Xcode
+    /// builds); clang refuses both with "redefinition of module", which failed
+    /// every patch compile. Generated maps come first, so they win.
+    static func firstDefinitions(_ maps: [String]) -> [String] {
+        var defined = Set<String>()
+        return maps.filter { map in
+            let names = moduleNames(in: (try? String(contentsOfFile: map, encoding: .utf8)) ?? "")
+            guard names.isEmpty || names.isDisjoint(with: defined) else { return false }
+            defined.formUnion(names)
+            return true
+        }
+    }
+
+    /// The top-level module names a module map declares (`module X`,
+    /// `framework module X`, `explicit module X`), not its submodules or `extern module`s.
+    static func moduleNames(in text: String) -> Set<String> {
+        let decl = try! NSRegularExpression(pattern: #"^(?:(?:explicit|framework)\s+)*module\s+([A-Za-z_][\w.]*)"#, options: .anchorsMatchLines)
+        var names = Set<String>()
+        var depth = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let s = String(line).trimmingCharacters(in: .whitespaces)
+            if depth == 0, let m = decl.firstMatch(in: s, range: NSRange(location: 0, length: (s as NSString).length)) {
+                names.insert((s as NSString).substring(with: m.range(at: 1)))
+            }
+            depth += s.filter { $0 == "{" }.count - s.filter { $0 == "}" }.count
+        }
+        return names
     }
 
     /// Header search paths a module map's headers need: its own folder, and
