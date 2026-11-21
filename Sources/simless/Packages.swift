@@ -170,9 +170,9 @@ extension Packages {
           try withBuildToken(count: ws.config.buildConcurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 5)) {
             let t = now()
             Log.step("building \(targets.joined(separator: ", ")) for iOS (log: \(log))")
-            let r = try Cleanup.retryingPoisonedCache { try Shell.run(["xcodebuild", "build-for-testing", "-scheme", scheme, "-configuration", "Debug",
+            let r = try Cleanup.retryingPoisonedCache(ws.compilationCache) { try Shell.run(["xcodebuild", "build-for-testing", "-scheme", scheme, "-configuration", "Debug",
                                    "-destination", ws.destination, "-derivedDataPath", ws.derivedData]
-                                  + Workspace.buildSettings + targets.map { "-only-testing:\($0)" }, cwd: p.dir, logPath: log) }
+                                  + ws.buildSettings + targets.map { "-only-testing:\($0)" }, cwd: p.dir, logPath: log) }
             guard r.code == 0 else {
                 throw SimlessError("building \(p.package)'s tests failed (log: \(log)):\n" + Patch.compilerErrors(r.out))
             }

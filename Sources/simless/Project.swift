@@ -70,13 +70,11 @@ struct Workspace {
 
     static let configName = ".simless.json"
     /// Settings every build of the app and its packages' tests shares, so
-    /// they reuse each other's work in one build folder.
-    static let buildSettings = [
+    /// they reuse each other's work in one build folder (with `buildSettings`'
+    /// compilation cache).
+    static let sharedSettings = [
         "-skipMacroValidation", "-skipPackagePluginValidation",
         "CODE_SIGNING_ALLOWED=NO", "COMPILATION_CACHE_ENABLE_CACHING=YES",
-        // One content-addressed cache for every worktree: a new
-        // worktree's first build reuses what the others compiled.
-        "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache",
         // Nothing searches the index of these builds, and nothing reads their
         // debug info: failures name their file and line from the source,
         // crashes their functions from the symbol table. Without it builds are
@@ -148,6 +146,12 @@ struct Workspace {
         ProcessInfo.processInfo.environment["SIMLESS_STANDBY_IDLE_MINUTES"].flatMap(Int.init) ?? config.standbyIdleMinutes ?? min(idleMinutes, 10)
     }
     var derivedData: String { "\(work)/DerivedData" }
+    /// This worktree's content-addressed compilation cache. Each worktree has its own: one cache shared by several
+    /// builds at once (worktrees building side by side) crashed Xcode's build service in the cache's memory-mapped
+    /// store (SIGBUS, "FS pagein error", in OnDiskHashMappedTrie::insertLazy; "The Xcode build system has crashed").
+    var compilationCache: String { "\(work)/CompilationCache" }
+    /// Every build of this worktree: the shared settings and its own compilation cache.
+    var buildSettings: [String] { Self.sharedSettings + ["COMPILATION_CACHE_CAS_PATH=\(compilationCache)"] }
     var products: String { "\(derivedData)/Build/Products" }
     var productsIphoneos: String { "\(products)/Debug-iphoneos" }
 
@@ -290,10 +294,10 @@ struct Workspace {
             let t = now()
             Log.step("building \(config.scheme) for \(native ? "iOS" : "Designed-for-iPad") (log: \(buildLog))")
             func run(_ action: String) throws -> Shell.Result {
-                try Cleanup.retryingPoisonedCache {
+                try Cleanup.retryingPoisonedCache(compilationCache) {
                     try Shell.run(["xcodebuild", action,
                                  "-project", project, "-scheme", config.scheme, "-configuration", "Debug",
-                                 "-destination", destination, "-derivedDataPath", derivedData] + Self.buildSettings,
+                                 "-destination", destination, "-derivedDataPath", derivedData] + buildSettings,
                                 cwd: root, logPath: buildLog)
                 }
             }

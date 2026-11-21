@@ -397,7 +397,7 @@ func cmdStart(_ args: Args) throws {
 
 func cmdUp(_ args: Args) throws {
     let ws = try Workspace.load()
-    Cleanup.capCompileCache()
+    Cleanup.capCompileCache(ws)
     let t = now()
     let buildStart = Date().timeIntervalSinceReferenceDate
     // Mark the build cache as ours before creating anything in it, so another
@@ -714,8 +714,10 @@ func statusJSON() throws {
         let worktree = (try? String(contentsOfFile: "\(work)/\(dir)/worktree.txt", encoding: .utf8)) ?? dir
         return ["worktree": worktree, "gb": (Cleanup.sizeGB("\(work)/\(dir)") * 100).rounded() / 100]
     }
-    let cas = Cleanup.sizeGB("\(Paths.cache)/CompilationCache"), slots = Cleanup.sizeGB(Paths.slots)
-    let total = worktrees.reduce(0) { $0 + ($1["gb"] as? Double ?? 0) } + cas + slots
+    // Each worktree's compilation cache is inside its build folder (counted there); this is their sum.
+    let cas = ((try? FileManager.default.contentsOfDirectory(atPath: work)) ?? []).reduce(0) { $0 + Cleanup.sizeGB("\(work)/\($1)/CompilationCache") }
+    let slots = Cleanup.sizeGB(Paths.slots)
+    let total = worktrees.reduce(0) { $0 + ($1["gb"] as? Double ?? 0) } + slots
     let out: [String: Any] = [
         "simless": version, "hosts": hosts, "hostsUp": hosts.filter { $0["state"] as? String == "up" }.count, "testRuns": runs,
         "disk": ["path": Paths.cache, "totalGB": (total * 100).rounded() / 100, "limitGB": Cleanup.diskLimitGB(),
@@ -804,13 +806,13 @@ func cmdStatus(_ args: Args) throws {
         let worktree = (try? String(contentsOfFile: "\(Paths.cache)/work/\(dir)/worktree.txt", encoding: .utf8)) ?? dir
         return (worktree, gb("\(Paths.cache)/work/\(dir)"))
     }
-    let cas = gb("\(Paths.cache)/CompilationCache"), slots = gb("\(Paths.cache)/slots")
-    let total = builds.reduce(0) { $0 + $1.1 } + cas + slots
+    // Each worktree's compilation cache is inside its build folder, counted with it.
+    let slots = gb("\(Paths.cache)/slots")
+    let total = builds.reduce(0) { $0 + $1.1 } + slots
     print(String(format: "disk: %.1f GB in %@", total, Paths.cache))
     for (worktree, size) in builds.sorted(by: { $0.1 > $1.1 }) {
-        print(String(format: "  %.1f GB  builds and results for %@ (`simless clean` there frees it)", size, worktree))
+        print(String(format: "  %.1f GB  builds, results and compilation cache for %@ (`simless clean` there frees it; its cache is cleared above %.0f GB)", size, worktree, Cleanup.compileCacheLimitGB))
     }
-    print(String(format: "  %.1f GB  shared compilation cache (makes builds in new worktrees fast; cleared above %.0f GB)", cas, Cleanup.compileCacheLimitGB))
     print(String(format: "  %.1f GB  installed slots, as du counts them (mostly APFS clones of the builds, so less on the disk)", slots))
     print("  `simless clean --all` frees everything")
     let probe = state.slots.first { $0.kind == nil && $0.stats() != nil }
