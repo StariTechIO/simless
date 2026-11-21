@@ -277,8 +277,18 @@ struct SlotRecord: Codable {
     var lastPatch: String?      // newest patch dylib; re-applied whenever the host relaunches
     var covered: [String]?      // fixtures the newest patch renders with the edits
     var stale: [String]?        // fixtures that reach an edit the newest patch doesn't cover
-    var kind: String?           // nil: the render host. "test": unit tests. "ui1"...: UI test app hosts
+    var kind: String?           // nil: the render host. "lane2"...: more render hosts. "test": unit tests. "ui1"...: UI test app hosts
     var slotID: String { "\(bundleBase).simless\(n)\(kind.map { "-" + $0 } ?? "")" }
+    /// A render host: the worktree's own (kind nil) or one of its lanes, each its own app copy from the same build, so
+    /// several drivers can each run a host of one worktree at once (`simless start --lane N`).
+    var isRenderHost: Bool { kind == nil || Self.laneNumber(kind) != nil }
+
+    /// The slot kind of render lane `n`: nil for lane 1 (the worktree's render host), "lane<n>" above it.
+    static func laneKind(_ n: Int) -> String? { n <= 1 ? nil : "lane\(n)" }
+    static func laneNumber(_ kind: String?) -> Int? {
+        guard let kind, kind.hasPrefix("lane"), let n = Int(kind.dropFirst(4)), n >= 2 else { return nil }
+        return n
+    }
     var dir: String { "\(Paths.slots)/\(slotID)" }
 }
 
