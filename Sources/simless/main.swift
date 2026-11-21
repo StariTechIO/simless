@@ -865,7 +865,9 @@ func cmdDown(_ args: Args) throws {
         let mine = worktree == here?.root ? " (this worktree)" : ""
         print("stopping \(list.count) host(s) of \(worktree)\(mine): \(list.map(\.slotID).joined(separator: ", "))")
     }
-    for s in running { Slots.stop(s) }
+    // Every host at once: each stop waits for its own process (a render host up to 3 s, then up to 5 s more for any
+    // instance left), and one after another a worktree's hosts took 15 s at the end of every Nullpoint suite.
+    DispatchQueue.concurrentPerform(iterations: running.count) { Slots.stop(running[$0]) }
     print("stopped \(running.count) host(s); they start again on next use")
 }
 
