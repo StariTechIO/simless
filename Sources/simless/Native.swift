@@ -270,7 +270,7 @@ enum Native {
         // "Designed for iPad" one after a few dozen renders. Returning them at
         // once costs CPU-bound code ~4%, so only render hosts, which live long
         // and side by side, do it; test hosts run as fast as before.
-        let spaceEfficient = ProcessInfo.processInfo.environment["SIMLESS_MALLOC_SPACE_EFFICIENT"] ?? (slot.kind == nil ? "1" : nil)
+        let spaceEfficient = ProcessInfo.processInfo.environment["SIMLESS_MALLOC_SPACE_EFFICIENT"] ?? (slot.isRenderHost ? "1" : nil)
         if let spaceEfficient { env["MallocSpaceEfficient"] = spaceEfficient }
         return env
     }

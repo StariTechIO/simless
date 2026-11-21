@@ -372,7 +372,7 @@ enum Slots {
     /// Stops whatever runs in the slot: a render host asked nicely first, then
     /// every process of the slot's bundle id (test and UI hosts, standbys).
     static func stop(_ slot: SlotRecord) {
-        if slot.kind == nil, let stats = slot.stats() {
+        if slot.isRenderHost, let stats = slot.stats() {
             _ = try? slot.client(timeout: 2).call(["cmd": "stop"])
             if let pid = stats["pid"] as? Int {
                 for _ in 0..<30 where kill(pid_t(pid), 0) == 0 { Thread.sleep(forTimeInterval: 0.1) }

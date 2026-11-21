@@ -71,7 +71,7 @@ enum RuntimeHost {
             env["SIMLESS_ORIGINAL_BUNDLE_ID"] = original
         }
         if Native.isNative(slot) { env.merge(Native.environment(slot)) { $1 } }
-        if let ws = try? Workspace.load(at: slot.worktree), let network = networkPolicy(ws, testHost: slot.kind != nil) {
+        if let ws = try? Workspace.load(at: slot.worktree), let network = networkPolicy(ws, testHost: !slot.isRenderHost) {
             env["SIMLESS_NETWORK"] = network
         }
         return env

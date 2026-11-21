@@ -64,7 +64,7 @@ struct Args {
 
     init(_ raw: [String]) {
         let valued: Set<String> = ["--hosts", "--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target", "--template",
-                                   "--locale", "--text-size", "--idiom", "--settle", "--timeout", "--runtime", "--sim-device", "--jobs", "--from"]
+                                   "--locale", "--text-size", "--idiom", "--settle", "--timeout", "--runtime", "--sim-device", "--jobs", "--from", "--lane"]
         let repeatable: Set<String> = ["--skip"]
         var i = 0
         while i < raw.count {
@@ -386,10 +386,26 @@ func runningSlot(_ ws: Workspace) throws -> SlotRecord {
     return slot
 }
 
+/// The render lane `--lane N` names: 1 (the default) is the worktree's render host.
+func laneArg(_ args: Args) throws -> Int {
+    guard let raw = args.values["--lane"] else { return 1 }
+    guard let n = Int(raw), n >= 1, n <= 64 else { throw SimlessError("--lane takes a lane number from 1 to 64") }
+    return n
+}
+
 /// Starts the installed host without building: what `render` and `act` do on first use, on its own, so a caller that
 /// stops the host between runs (to wipe its data) gets it back in about a second instead of a `simless up`.
+/// `--lane N` (N >= 2) starts another render host of this worktree, its own app copy prepared from the worktree's build
+/// (an APFS clone, no build): several drivers each keep a host of one build, side by side.
 func cmdStart(_ args: Args) throws {
-    let slot = try runningSlot(try Workspace.load())
+    let ws = try Workspace.load()
+    let slot: SlotRecord
+    if let kind = SlotRecord.laneKind(try laneArg(args)) {
+        slot = try RuntimeHost.slot(kind: kind, ws: ws)
+        if slot.stats() == nil { try Slots.launch(slot, idleMinutes: ws.idleMinutes) }
+    } else {
+        slot = try runningSlot(ws)
+    }
     let out: [String: Any] = ["slot": slot.slotID, "port": slot.port, "dir": slot.dir]
     let data = try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])
     print(String(decoding: data, as: UTF8.self))
@@ -700,7 +716,7 @@ func statusJSON() throws {
                                 "role": s.kind.map { $0.hasPrefix("test") ? "unit-tests" : "ui-tests" } ?? "renders"]
         if let use = RuntimeHost.usage(s) {
             h["state"] = "up"; h["memoryMB"] = (use.mb * 10).rounded() / 10; h["cpuPercent"] = (use.cpu * 10).rounded() / 10
-            if s.kind == nil, let st = s.stats() { h["patch"] = s.patch; h["renders"] = st["renders"] ?? 0 }
+            if s.isRenderHost, let st = s.stats() { h["patch"] = s.patch; h["renders"] = st["renders"] ?? 0 }
         } else {
             h["state"] = "down"
         }
@@ -773,14 +789,14 @@ func cmdStatus(_ args: Args) throws {
     if state.slots.isEmpty { print("no hosts"); return }
     var totalMB = 0.0, running = 0
     for s in state.slots.sorted(by: { $0.port < $1.port }) {
-        let role = s.kind.map { $0.hasPrefix("test") ? "unit tests" : "UI tests" } ?? "renders"
+        let role = s.isRenderHost ? "renders" : s.kind.map { $0.hasPrefix("test") ? "unit tests" : "UI tests" } ?? "renders"
         if let use = RuntimeHost.usage(s) {
             totalMB += use.mb
             running += 1
             var line = "\(s.slotID)  :\(s.port)  up    \(role)  \(Int(use.mb)) MB  \(String(format: "%.0f", use.cpu))% CPU"
-            if s.kind == nil, let st = s.stats() { line += "  patch \(st["patch"] ?? 0)  renders \(st["renders"] ?? 0)" }
+            if s.isRenderHost, let st = s.stats() { line += "  patch \(st["patch"] ?? 0)  renders \(st["renders"] ?? 0)" }
             // What the app keeps in its data container (only test and UI hosts can say).
-            if s.kind != nil, let c = try? LineClient(port: s.port, timeout: 2), let u = try? c.call(["cmd": "usage"]),
+            if !s.isRenderHost, let c = try? LineClient(port: s.port, timeout: 2), let u = try? c.call(["cmd": "usage"]),
                let bytes = u["containerBytes"] as? Int {
                 line += "  data \(bytes / 1_048_576) MB"
             }
@@ -830,8 +846,13 @@ func cmdDown(_ args: Args) throws {
             print("kept the hosts of \(worktree): a test run is going on there")
         }
         slots.removeAll { busy.contains($0.worktree) && $0.worktree != here?.root }
+    } else if args.values["--lane"] != nil {
+        // One render lane's host, nothing else of the worktree: the other lanes, and test hosts, keep running.
+        guard let here else { throw SimlessError("not in a simless worktree") }
+        let kind = SlotRecord.laneKind(try laneArg(args))
+        slots = GlobalState.load().slots.filter { $0.worktree == here.root && $0.kind == kind }
     } else {
-        // This worktree's render host and its test and UI hosts.
+        // This worktree's render hosts and its test and UI hosts.
         guard let here else { throw SimlessError("not in a simless worktree; `simless down --all` stops every worktree's hosts") }
         slots = GlobalState.load().slots.filter { $0.worktree == here.root }
     }
