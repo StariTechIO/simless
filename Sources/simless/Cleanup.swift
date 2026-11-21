@@ -173,13 +173,17 @@ enum Cleanup {
     /// Runs a build, and if it failed on a damaged compilation cache (an
     /// entry left half-written, by a full disk for one), clears the cache and
     /// builds once more.
-    static func retryingPoisonedCache(_ build: () throws -> Shell.Result) rethrows -> Shell.Result {
+    /// `cache` is the worktree's own (Workspace.compilationCache): nothing else builds with it meanwhile.
+    static func retryingPoisonedCache(_ cache: String, _ build: () throws -> Shell.Result) rethrows -> Shell.Result {
         let r = try build()
         guard r.code != 0, r.out.contains("cache poisoned") || r.out.contains("caching backend error") else { return r }
-        Log.step("the shared compilation cache is damaged; clearing it and building again")
-        try? FileManager.default.removeItem(atPath: "\(Paths.cache)/CompilationCache")
+        Log.step("the compilation cache is damaged; clearing it and building again")
+        try? FileManager.default.removeItem(atPath: cache)
         return try build()
     }
+
+    /// The one compilation cache every worktree shared before each had its own; nothing builds with it any more.
+    static let retiredSharedCache = "\(Paths.cache)/CompilationCache"
 
     /// Everything simless keeps, across worktrees, in GB: SIMLESS_DISK_LIMIT_GB,
     /// then the project's `diskLimitGB`, then 25.
@@ -220,10 +224,11 @@ enum Cleanup {
             }
             try state.save()
         }
+        // Still over: this worktree's own compilation cache (its build is done; it only speeds up a clean build).
         if total > limit {
-            let freed = sizeGB("\(Paths.cache)/CompilationCache")
-            try? FileManager.default.removeItem(atPath: "\(Paths.cache)/CompilationCache")
-            Log.step(String(format: "disk: simless was over %.0f GB, cleared the shared compilation cache (%.1f GB)", limit, freed))
+            let freed = sizeGB(current.compilationCache)
+            try? FileManager.default.removeItem(atPath: current.compilationCache)
+            Log.step(String(format: "disk: simless was over %.0f GB, cleared this worktree's compilation cache (%.1f GB)", limit, freed))
         }
     }
 
@@ -231,13 +236,15 @@ enum Cleanup {
         exists("\(workDir)/last-used") ? mtime("\(workDir)/last-used") : mtime(workDir)
     }
 
-    /// The shared compile cache only speeds up first builds; drop it when large.
-    static func capCompileCache() {
-        let path = "\(Paths.cache)/CompilationCache"
+    /// A worktree's compile cache only speeds up clean builds; drop it when large. Runs before the worktree's own build,
+    /// when nothing builds with its cache. The retired shared cache goes too.
+    static func capCompileCache(_ ws: Workspace) {
+        try? FileManager.default.removeItem(atPath: retiredSharedCache)
+        let path = ws.compilationCache
         guard exists(path), let out = try? Shell.run(["/usr/bin/du", "-sk", path], useXcode: false).out,
               let kb = Double(out.split(separator: "\t").first ?? "") else { return }
         if kb / 1_048_576 > compileCacheLimitGB {
-            Log.step(String(format: "shared compile cache is %.1f GB; clearing it", kb / 1_048_576))
+            Log.step(String(format: "compile cache is %.1f GB; clearing it", kb / 1_048_576))
             try? FileManager.default.removeItem(atPath: path)
         }
     }
