@@ -54,7 +54,7 @@ enum SimlessHost {
     }
     /// Bumped when the CLI needs something new from the kit; `simless up` asks
     /// for a `simless init` when the app's copy is older.
-    static let kitVersion = 7
+    static let kitVersion = 8
 
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
@@ -122,6 +122,7 @@ enum SimlessHost {
         var textSize: String?      // Dynamic Type: xs … xxxl, ax1 … ax5
         var idiom: String?         // "phone": report the phone idiom (Mac only; see render)
         var settleMs: Double?      // time for the screen's async work (.task, loads, animations) before it's read
+        var defaults: [String: String]?  // app.reset: what to write to the app's standard defaults after the reset
     }
 
     private struct Node: Encodable {
@@ -157,6 +158,7 @@ enum SimlessHost {
         var renderMs: Double?
         var nodes: [Node]?
         var png: String?
+        var live: Int?             // app.reset: the app's objects from before the reset that are still alive (0 when it is fresh)
         var loadMs: Double?
         var traits: Traits?
         var locale: String?        // the host's language (simless relaunches it to switch)
@@ -202,6 +204,17 @@ enum SimlessHost {
                     waiting = true
                     SimlessHost.lastRequest = Date()
                     SimlessHost.renderSettled(req) { [self] response in
+                        send(response, nil)
+                        waiting = false
+                        drain()
+                    }
+                    return
+                }
+                // `app.reset` answers after the unmounted app has had a few turns of the main queue to let go of its state.
+                if let req = try? JSONDecoder().decode(Request.self, from: line), req.cmd == "app.reset" {
+                    waiting = true
+                    SimlessHost.lastRequest = Date()
+                    SimlessHost.reset(req) { [self] response in
                         send(response, nil)
                         waiting = false
                         drain()
@@ -268,6 +281,69 @@ enum SimlessHost {
         default:
             return (Response(ok: false, error: "unknown cmd \(req.cmd)"), nil)
         }
+    }
+
+    /// `app.reset`: the app back to a fresh install's state without a new process, for the next journey. The mounted app is
+    /// taken off the canvas (its sheets dismissed, its view tree released, so SwiftUI cancels its tasks), then, after a few
+    /// turns of the main queue, SimlessRuntime wipes its data in place (`simless_runtime_reset`: preferences, home, keychain,
+    /// URL caches) and writes `defaults`, and the app is told (`simless.app.reset`, its object a mutable dictionary) to reset
+    /// what lives outside its view tree and to count, as `live`, the objects from before that are still alive (asked first,
+    /// `simless.app.live`, until there are none or 2 s have passed). Nothing is
+    /// mounted after: the client renders `root` again. `live` above 0, or an error, means the reset could not make a fresh
+    /// app and the client starts a new host.
+    private static func reset(_ req: Request, _ reply: @escaping (Response) -> Void) {
+        // The canvas window goes with the app, presentations and all (a sheet's transition view left in it kept the next
+        // journey's sheet from presenting); the next render makes a new one, as a new host would.
+        if let w = window {
+            w.endEditing(true)
+            w.rootViewController?.presentedViewController?.dismiss(animated: false)
+            w.rootViewController = nil
+            w.isHidden = true
+            window = nil
+        }
+        // The app's own scene, which the host runs hidden beside the canvas, holds a second copy of its root: in a host
+        // started per journey it was new each time; reset in place, it would carry the last journey's state. It goes too.
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for w in scene.windows where w !== window && type(of: w) == UIWindow.self && w.rootViewController != nil {
+                w.endEditing(true)
+                w.rootViewController?.presentedViewController?.dismiss(animated: false)
+                w.rootViewController = nil
+            }
+        }
+        mounted = nil
+        if let release = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "simless_runtime_release") {
+            unsafeBitCast(release, to: (@convention(c) () -> Void).self)()
+        }
+        NotificationCenter.default.post(name: Notification.Name("simless.app.unmounted"), object: nil)
+        // The app's released views cancel their tasks, which let go of its state as they end (a request in flight to a
+        // local backend: milliseconds). Wait for the app to say nothing of it is alive (`simless.app.live`), at most 2 s;
+        // an app that does not answer is waited for 6 turns.
+        let started = Date()
+        var turns = 0
+        func turn() {
+            turns += 1
+            let asked = NSMutableDictionary()
+            NotificationCenter.default.post(name: Notification.Name("simless.app.live"), object: asked)
+            let live = asked["live"] as? Int
+            if turns < 6 || (live ?? 0) > 0 && Date().timeIntervalSince(started) < 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { MainActor.assumeIsolated { turn() } }
+                return
+            }
+            typealias Reset = @convention(c) (UnsafePointer<CChar>) -> Int32
+            guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "simless_runtime_reset") else {
+                return reply(Response(ok: false, error: "this host's SimlessRuntime cannot reset the app in place"))
+            }
+            let defaults = (try? JSONSerialization.data(withJSONObject: req.defaults ?? [:])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            let code = defaults.withCString { unsafeBitCast(sym, to: Reset.self)($0) }
+            guard code == 0 else { return reply(Response(ok: false, error: "the app's home is not its own data; nothing was reset")) }
+            let box = NSMutableDictionary()
+            NotificationCenter.default.post(name: Notification.Name("simless.app.reset"), object: box)
+            var r = Response()
+            r.live = box["live"] as? Int ?? 0
+            if let alive = box["alive"] as? String, !alive.isEmpty { r.error = "still alive: \(alive)" }
+            reply(r)
+        }
+        DispatchQueue.main.async { MainActor.assumeIsolated { turn() } }
     }
 
     // MARK: - Rendering
@@ -383,6 +459,7 @@ enum SimlessHost {
     private enum MountResult { case success(Mounted), failure(Response) }
 
     private static func mount(_ req: Request) -> MountResult {
+        NotificationCenter.default.post(name: Notification.Name("simless.app.mounting"), object: nil)
         guard let name = req.fixture, let view = registry.make(name) else {
             return .failure(Response(ok: false, error: "unknown fixture '\(req.fixture ?? "")'", fixtures: registry.names))
         }

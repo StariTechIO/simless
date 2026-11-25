@@ -13,6 +13,7 @@ enum UIAutomation {
         "ui.ready", "ui.snapshot", "ui.idle", "ui.tap", "ui.drag", "ui.swipe", "ui.type", "ui.scrollToVisible",
         "ui.pickerWheel", "ui.slider", "ui.screenshot", "ui.orientation", "ui.background", "ui.foreground",
         "ui.state", "ui.openURL", "ui.externalURLs", "ui.audit", "ui.appearance", "ui.flush", "ui.update",
+        "ui.wait", "ui.settle",
     ]
     static func handles(_ cmd: String) -> Bool { commands.contains(cmd) }
 
@@ -27,6 +28,21 @@ enum UIAutomation {
     /// Runs a command and replies on the main thread.
     static func handle(_ cmd: String, _ req: [String: Any], reply: @escaping ([String: Any]) -> Void) {
         let rid = req["rid"] as? String
+        // A wait gives the run loop back between looks (Waiter.start): the app's screen updates (a sheet being presented)
+        // land in its own turns, as they did between a client's polls.
+        if cmd == "ui.wait" {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    enableAutomation()
+                    Waiter.start(req) { answer in
+                        var answer = answer
+                        if let rid { answer["rid"] = rid; Replies.store(rid, answer) }
+                        reply(answer)
+                    }
+                }
+            }
+            return
+        }
         // A run loop block, not the main queue: commands spin the run loop while
         // they wait (idle, touches, dismissals), and inside a main-queue block
         // the main queue couldn't drain, so the app's own async work would stall.
@@ -41,6 +57,9 @@ enum UIAutomation {
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
+
+    /// Runs `body`; returns the Objective-C exception it threw, if any.
+    static func catching(_ body: @escaping () -> Void) -> String? { catchingExceptions(body) }
 
     /// Runs `body`; returns the Objective-C exception it threw, if any (catch.m).
     private static func catchingExceptions(_ body: @escaping () -> Void) -> String? {
@@ -70,6 +89,15 @@ enum UIAutomation {
             return ["ok": true, "updated": ScreenUpdates.apply()]
         case "ui.idle":
             let settled = Idle.wait(timeout: req["timeout"] as? Double ?? 2)
+            return ["ok": true, "settled": settled, "busy": settled ? "" : Idle.lastBusy]
+        case "ui.settle":
+            // After a step: idle, then the screen's pending updates and a layout of the mounted root (a navigation
+            // push lands only then, in a window with no scene), then one read of the tree (SwiftUI fills some labels
+            // only after they were read once). One request instead of idle, update and a full tree sent back.
+            let settled = Idle.wait(timeout: req["timeout"] as? Double ?? 2)
+            ScreenUpdates.apply()
+            Waiter.layOut()
+            _ = Snapshotter.take()
             return ["ok": true, "settled": settled, "busy": settled ? "" : Idle.lastBusy]
         case "ui.tap":
             let p = point(req)
@@ -394,6 +422,13 @@ enum ContentSize {
 enum Snapshotter {
     private static var refs: [NSObject] = []
     static func object(ref: Int) -> NSObject? { refs.indices.contains(ref) ? refs[ref] : nil }
+    /// Lets go of the last snapshot's elements (`app.reset`): they hold the app's views, and with them its state.
+    static func forget() {
+        refs = []
+        parents = [:]
+        types = [:]
+        generation += 1
+    }
     private static var generation = 0
 
     static func object(_ req: [String: Any]) -> NSObject? {
@@ -743,6 +778,73 @@ enum Hit {
 /// screen updates is what runs that update (a flush or a layout pass doesn't),
 /// and it costs 40 to 70 ms, so it runs only when a view the screen lists
 /// isn't in the window yet, or a collection view has updates it hasn't shown.
+/// `ui.wait`: waits in the host for an element to appear (or, with `gone`, to go) and answers the moment it does, or
+/// when the time runs out, instead of the client asking for the whole tree again and again. Matching is the journey
+/// driver's: `#id` matches the identifier; else the label exactly, or its start (`prefix`), or any part (`contains`),
+/// or the identifier or placeholder exactly; `types` keeps only those element types. Among matches, hittable ones first,
+/// then ones that are not automation-only. The mounted root is laid out every `layOutEvery` seconds while it waits: a
+/// navigation the app makes after a network call lands only when the screen is laid out.
+enum Waiter {
+    static func layOut() {
+        guard let w = UIAutomation.renderWindow else { return }
+        (w.rootViewController?.view ?? w).layoutIfNeeded()
+    }
+
+    static func matches(_ n: [String: Any], _ query: String, prefix: Bool, contains: Bool) -> Bool {
+        let label = n["label"] as? String ?? ""
+        if query.hasPrefix("#") { return (n["id"] as? String) == String(query.dropFirst()) }
+        if prefix { return label.hasPrefix(query) }
+        if contains { return label.contains(query) }
+        return label == query || (n["id"] as? String) == query || (n["placeholder"] as? String) == query
+    }
+
+    static func best(_ nodes: [[String: Any]], _ req: [String: Any]) -> [String: Any]? {
+        let query = req["query"] as? String ?? ""
+        let prefix = req["prefix"] as? Bool ?? false, contains = req["contains"] as? Bool ?? false
+        let types = (req["types"] as? [Int]).map(Set.init)
+        let found = nodes.filter { n in
+            matches(n, query, prefix: prefix, contains: contains) && (types.map { $0.contains(n["type"] as? Int ?? -1) } ?? true)
+        }
+        func rank(_ n: [String: Any]) -> Int {
+            ((n["hittable"] as? Bool) == true ? 0 : 2) + ((n["automationOnly"] as? Bool) == true ? 1 : 0)
+        }
+        return found.enumerated().min { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }?.element
+    }
+
+    /// Looks now, and again every 50 ms on the main queue until the element is there (or gone) or the time runs out; the
+    /// run loop runs the app's own work between looks.
+    static func start(_ req: [String: Any], _ reply: @escaping ([String: Any]) -> Void) {
+        let gone = req["gone"] as? Bool ?? false
+        let deadline = Date().addingTimeInterval(req["timeout"] as? Double ?? 15)
+        let every = req["layOutEvery"] as? Double ?? 3
+        var laidOut = Date()
+        var looks = 0
+        func look() {
+            var answer: [String: Any]?
+            let thrown = UIAutomation.catching {
+                ScreenUpdates.apply()
+                let (nodes, generation) = Snapshotter.take()
+                looks += 1
+                let node = best(nodes, req)
+                if (node != nil) != gone {
+                    var r: [String: Any] = ["ok": true, "found": true, "generation": generation, "looks": looks]
+                    if let node { r["node"] = node }
+                    answer = r
+                } else if Date() >= deadline {
+                    answer = ["ok": true, "found": false, "generation": generation, "looks": looks]
+                } else if Date().timeIntervalSince(laidOut) >= every {
+                    layOut()
+                    laidOut = Date()
+                }
+            }
+            if let thrown { return reply(["ok": false, "error": "UIKit threw \(thrown) during ui.wait"]) }
+            if let answer { return reply(answer) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { look() } }
+        }
+        look()
+    }
+}
+
 enum ScreenUpdates {
     /// Whether there was an update to run.
     @discardableResult
