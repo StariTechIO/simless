@@ -137,6 +137,13 @@ final class Keychain: @unchecked Sendable {
         items = list
     }
 
+    /// A fresh install's keychain: no items, in memory and on disk (`app.reset`).
+    func clear() {
+        lock.lock(); defer { lock.unlock() }
+        items = []
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     private func save() {
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         if let d = try? PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0) {

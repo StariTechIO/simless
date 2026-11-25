@@ -102,6 +102,39 @@ public func simlessRuntimeUI(_ json: UnsafePointer<CChar>, _ window: UnsafeMutab
     UIAutomation.handle(cmd, req) { send($0) }
 }
 
+/// `app.reset` in a render host, right after SimlessKit took the app off its canvas: what the runtime holds of the app's
+/// views (the last snapshot's elements, a typing accessory) is let go, so the app's state can be released.
+@_cdecl("simless_runtime_release")
+public func simlessRuntimeRelease() {
+    MainActor.assumeIsolated {
+        Snapshotter.forget()
+        Keyboard.accessoryView = nil
+        Keyboard.visible = false
+        UIAutomation.renderWindow = nil
+    }
+}
+
+/// `app.reset` in a render host (SimlessKit, after it unmounted the app): the app's data back to a fresh install's, in
+/// place, as `SIMLESS_WIPE` leaves a stopped slot: its preferences (through cfprefsd), the files in its home, its keychain
+/// in memory and on disk, and the URL loading system's caches and cookies. Then `defaults` (a JSON object of strings) is
+/// written to the standard domain, as `defaults write` would before a launch. Returns 0, or 1 when the home is not the
+/// app's own data (nothing is touched).
+@_cdecl("simless_runtime_reset")
+public func simlessRuntimeReset(_ defaults: UnsafePointer<CChar>) -> Int32 {
+    guard Housekeeping.isAppData(NSHomeDirectory()) else { return 1 }
+    Housekeeping.resetDefaults()
+    Housekeeping.empty(NSHomeDirectory(), keepFolders: 2, keeping: ["Preferences"])
+    Keychain.shared.clear()
+    URLCache.shared.removeAllCachedResponses()
+    HTTPCookieStorage.shared.removeCookies(since: .distantPast)
+    if let data = String(cString: defaults).data(using: .utf8),
+       let values = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+        for (k, v) in values { UserDefaults.standard.set(v, forKey: k) }
+    }
+    UserDefaults.standard.synchronize()
+    return 0
+}
+
 /// SimlessKit's render window on the Mac, a window with no scene, returned
 /// retained. `UIWindow(frame:)` is deprecated since iOS 26 and no other
 /// initializer makes a window without a scene, so the kit, which is part of the
