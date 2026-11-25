@@ -28,6 +28,21 @@ enum UIAutomation {
     /// Runs a command and replies on the main thread.
     static func handle(_ cmd: String, _ req: [String: Any], reply: @escaping ([String: Any]) -> Void) {
         let rid = req["rid"] as? String
+        // A wait gives the run loop back between looks (Waiter.start): the app's screen updates (a sheet being presented)
+        // land in its own turns, as they did between a client's polls.
+        if cmd == "ui.wait" {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    enableAutomation()
+                    Waiter.start(req) { answer in
+                        var answer = answer
+                        if let rid { answer["rid"] = rid; Replies.store(rid, answer) }
+                        reply(answer)
+                    }
+                }
+            }
+            return
+        }
         // A run loop block, not the main queue: commands spin the run loop while
         // they wait (idle, touches, dismissals), and inside a main-queue block
         // the main queue couldn't drain, so the app's own async work would stall.
@@ -42,6 +57,9 @@ enum UIAutomation {
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
+
+    /// Runs `body`; returns the Objective-C exception it threw, if any.
+    static func catching(_ body: @escaping () -> Void) -> String? { catchingExceptions(body) }
 
     /// Runs `body`; returns the Objective-C exception it threw, if any (catch.m).
     private static func catchingExceptions(_ body: @escaping () -> Void) -> String? {
@@ -81,8 +99,6 @@ enum UIAutomation {
             Waiter.layOut()
             _ = Snapshotter.take()
             return ["ok": true, "settled": settled, "busy": settled ? "" : Idle.lastBusy]
-        case "ui.wait":
-            return Waiter.wait(req)
         case "ui.tap":
             let p = point(req)
             let count = req["count"] as? Int ?? 1
@@ -795,27 +811,37 @@ enum Waiter {
         return found.enumerated().min { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }?.element
     }
 
-    static func wait(_ req: [String: Any]) -> [String: Any] {
+    /// Looks now, and again every 50 ms on the main queue until the element is there (or gone) or the time runs out; the
+    /// run loop runs the app's own work between looks.
+    static func start(_ req: [String: Any], _ reply: @escaping ([String: Any]) -> Void) {
         let gone = req["gone"] as? Bool ?? false
         let deadline = Date().addingTimeInterval(req["timeout"] as? Double ?? 15)
         let every = req["layOutEvery"] as? Double ?? 3
         var laidOut = Date()
         var looks = 0
-        while true {
-            ScreenUpdates.apply()
-            let (nodes, generation) = Snapshotter.take()
-            looks += 1
-            let node = best(nodes, req)
-            if (node != nil) != gone {
-                var r: [String: Any] = ["ok": true, "found": true, "generation": generation, "looks": looks]
-                if let node { r["node"] = node }
-                return r
+        func look() {
+            var answer: [String: Any]?
+            let thrown = UIAutomation.catching {
+                ScreenUpdates.apply()
+                let (nodes, generation) = Snapshotter.take()
+                looks += 1
+                let node = best(nodes, req)
+                if (node != nil) != gone {
+                    var r: [String: Any] = ["ok": true, "found": true, "generation": generation, "looks": looks]
+                    if let node { r["node"] = node }
+                    answer = r
+                } else if Date() >= deadline {
+                    answer = ["ok": true, "found": false, "generation": generation, "looks": looks]
+                } else if Date().timeIntervalSince(laidOut) >= every {
+                    layOut()
+                    laidOut = Date()
+                }
             }
-            if Date() >= deadline { return ["ok": true, "found": false, "generation": generation, "looks": looks] }
-            // The app's own work runs on this run loop: give it about three frames before looking again.
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-            if Date().timeIntervalSince(laidOut) >= every { layOut(); laidOut = Date() }
+            if let thrown { return reply(["ok": false, "error": "UIKit threw \(thrown) during ui.wait"]) }
+            if let answer { return reply(answer) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { look() } }
         }
+        look()
     }
 }
 

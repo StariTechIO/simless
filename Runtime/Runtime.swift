@@ -122,11 +122,12 @@ public func simlessRuntimeRelease() {
 @_cdecl("simless_runtime_reset")
 public func simlessRuntimeReset(_ defaults: UnsafePointer<CChar>) -> Int32 {
     guard Housekeeping.isAppData(NSHomeDirectory()) else { return 1 }
+    // The URL loading system's caches first: their database is in the home, and emptied under it, the cache breaks.
+    URLCache.shared.removeAllCachedResponses()
+    HTTPCookieStorage.shared.removeCookies(since: .distantPast)
     Housekeeping.resetDefaults()
     Housekeeping.empty(NSHomeDirectory(), keepFolders: 2, keeping: ["Preferences"])
     Keychain.shared.clear()
-    URLCache.shared.removeAllCachedResponses()
-    HTTPCookieStorage.shared.removeCookies(since: .distantPast)
     if let data = String(cString: defaults).data(using: .utf8),
        let values = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
         for (k, v) in values { UserDefaults.standard.set(v, forKey: k) }

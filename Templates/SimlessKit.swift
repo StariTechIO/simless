@@ -292,10 +292,14 @@ enum SimlessHost {
     /// mounted after: the client renders `root` again. `live` above 0, or an error, means the reset could not make a fresh
     /// app and the client starts a new host.
     private static func reset(_ req: Request, _ reply: @escaping (Response) -> Void) {
+        // The canvas window goes with the app, presentations and all (a sheet's transition view left in it kept the next
+        // journey's sheet from presenting); the next render makes a new one, as a new host would.
         if let w = window {
             w.endEditing(true)
             w.rootViewController?.presentedViewController?.dismiss(animated: false)
             w.rootViewController = nil
+            w.isHidden = true
+            window = nil
         }
         // The app's own scene, which the host runs hidden beside the canvas, holds a second copy of its root: in a host
         // started per journey it was new each time; reset in place, it would carry the last journey's state. It goes too.
